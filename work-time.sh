@@ -1,4 +1,13 @@
 #!/bin/bash
+
+IS_JALALI=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -j) IS_JALALI=true; shift ;;
+        *) shift ;; # Ignore other arguments
+    esac
+done
+
 get-date() {
     journalctl --list-boots --no-pager | awk '
    	NR == 1 { next }
@@ -22,7 +31,9 @@ echo "|    DATE    |    IN    |    OUT   | HOURS |           VISUAL CHART       
 echo "+------------+----------+----------+-------+--------------------------------+"
 
 get-date | while read -r DAY DATE IN OUT; do
-    DATE=$(jdate -j ${DATE//\-/\/} +"%Y/%m/%d")
+    if [ "$IS_JALALI" = true ]; then
+        DATE=$(jdate -j ${DATE//\-/\/} +"%Y/%m/%d")
+    fi
     start_sec=$(date -d "1970-01-01 $IN" +%s 2>/dev/null)
     end_sec=$(date -d "1970-01-01 $OUT" +%s 2>/dev/null)
 
