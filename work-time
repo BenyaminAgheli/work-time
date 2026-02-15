@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# Defaults
+IS_JALALI=false
+EXPORT_CSV=false
+EXPORT_JSON=false
+SYNC_N8N=false
+WEBHOOK_URL="http://localhost:5678/webhook/work-time"
+TOTAL_HOURS=0
+START_DATE=$(date -d "1 month ago" +%Y-%m-%d)
+END_DATE=$(date +%Y-%m-%d)
+JSON_SYNC_DATA=""
+
+# Argument Parsing
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -j) IS_JALALI=true; shift ;;
+        --csv) EXPORT_CSV=true; shift ;;
+        --json) EXPORT_JSON=true; shift ;;
+        --sync) SYNC_N8N=true; shift ;;
+        -w) START_DATE=$(date -d "1 week ago" +%Y-%m-%d); shift ;;
+        -m) START_DATE=$(date -d "1 month ago" +%Y-%m-%d); shift ;;
+        *) shift ;;
+    esac
+done
+
+# 1. Collect real data into a temporary associative array
+declare -A LOG_DATA
+while read -r D IN OUT; do
+    LOG_DATA["$D"]="$IN|$OUT"
+done < <(journalctl --list-boots --no-pager | awk 'NR>1 {d=$4; s=$5; e=$9; if(!(d in f)) f[d]=s; l[d]=e} END {for(i in f) print i, f[i], l[i]}')
+
+# Header Handling
+if [ "$SYNC_N8N" = false ]; then
+    if [ "$EXPORT_CSV" = false ] && [ "$EXPORT_JSON" = false ]; then
+        echo "+------------+----------+----------+-------+--------------------------------+"
+        echo "|    DATE    |    IN    |    OUT   | HOURS |        VISUAL CHART        |"
+        echo "+------------+----------+----------+-------+--------------------------------+"
+    elif [ "$EXPORT_CSV" = true ]; then
+        echo "Date,In,Out,Hours"
+    fi
+fi
+
+# 2. Iterate through EVERY day
+current_date="$START_DATE"
+while [[ "$current_date" < "$(date -d "$END_DATE + 1 day" +%Y-%m-%d)" ]]; do
+    
+    if [[ -n "${LOG_DATA[$current_date]}" ]]; then
+        IN=$(echo "${LOG_DATA[$current_date]}" | cut -d'|' -f1)
+        OUT=$(echo "${LOG_DATA[$current_date]}" | cut -d'|' -f2)
+        
+        start_sec=$(date -d "1970-01-01 $IN" +%s 2>/dev/null)
+        end_sec=$(date -d "1970-01-01 $OUT" +%s 2>/dev/null)
+        diff_sec=$((end_sec - start_sec))
+        if [ $diff_sec -lt 0 ]; then diff_sec=$((diff_sec + 86400)); fi
+        hours=$(awk "BEGIN {printf \"%.2f\", $diff_sec/3600}")
+    else
+        IN="--:--:--"
+        OUT="--:--:--"
+        hours="0.00"
+    fi
+
+    DISPLAY_DATE=$current_date
+    if [ "$IS_JALALI" = true ]; then
+        DISPLAY_DATE=$(jdate -j ${current_date//\-/\/} +"%Y/%m/%d")
+    fi
+
+    # Create the record object
+    RECORD="{\"date\":\"$DISPLAY_DATE\",\"in\":\"$IN\",\"out\":\"$OUT\",\"hour\":$hours}"
+
+    if [ -z "$JSON_SYNC_DATA" ]; then
+        JSON_SYNC_DATA="$RECORD"
+    else
+        JSON_SYNC_DATA="$RECORD,$JSON_SYNC_DATA"
+    fi
+
+    # Screen Output (Terminal view)
+    if [ "$SYNC_N8N" = false ]; then
+        if [ "$EXPORT_CSV" = true ]; then
+            echo "$DISPLAY_DATE,$IN,$OUT,$hours"
+        elif [ "$EXPORT_JSON" = false ]; then
+            bar_count=$(awk "BEGIN {bc=int($hours * 2); print (bc>0?bc:0)}")
+            bar=$(printf "%${bar_count}s" | tr ' ' '#')
+            printf "| %-10s | %-8s | %-8s | %-5s | %-30s |\n" "$DISPLAY_DATE" "$IN" "$OUT" "$hours" "$bar"
+        fi
+    fi
+
+    TOTAL_HOURS=$(awk "BEGIN {printf \"%.2f\", $TOTAL_HOURS + $hours}")
+    current_date=$(date -d "$current_date + 1 day" +%Y-%m-%d)
+done
+
+# 3. Final Handling
+if [ "$SYNC_N8N" = true ]; then
+    echo "Syncing data to $WEBHOOK_URL..."
+    # Wrap in a standard JSON array/object structure
+    FINAL_PAYLOAD="{\"total_hours\":$TOTAL_HOURS,\"records\":[$JSON_SYNC_DATA]}"
+    
+    curl -s -X POST "$WEBHOOK_URL" \
+        -H "Content-Type: application/json" \
+        -d "$FINAL_PAYLOAD"
+    
+    echo -e "\nSyncing complete."
+elif [ "$EXPORT_JSON" = true ]; then
+    echo "{\"total_hours\":$TOTAL_HOURS,\"records\":[$JSON_SYNC_DATA]}"
+elif [ "$EXPORT_CSV" = false ]; then
+    echo "+------------+----------+----------+-------+--------------------------------+"
+    printf "| TOTAL ACCUMULATED HOURS: %-44s |\n" "$TOTAL_HOURS"
+    echo "+------------+----------+----------+-------+--------------------------------+"
+fi
